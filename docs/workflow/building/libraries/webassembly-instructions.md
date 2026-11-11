@@ -2,7 +2,7 @@
 
 ## Prerequisites
 
-If you haven't already done so, please read [this document](../../README.md#Build_Requirements) to understand the build requirements for your operating system.
+If you haven't already done so, please read [this document](../../README.md#introduction) to understand the build requirements for your operating system.
 
 ## Wasm tool provisioning
 
@@ -50,7 +50,7 @@ Add `/p:PruneAllWasmTools=true` to remove the cache entirely.
 
 At this time no other build dependencies are necessary to start building for WebAssembly. Emscripten will be downloaded and installed automatically in the build process. To read how to build on specific platforms, see [Building](../../../../src/mono/browser/README.md#building).
 
-This document explains how to work on the runtime or libraries. If you haven't already done so, please read [this document](../../README.md#Configurations) to understand configurations.
+This document explains how to work on the runtime or libraries. If you haven't already done so, please read [this document](../../README.md#build-configurations) to understand configurations.
 
 When rebuilding with `build.sh` after a code change, you need to ensure that the `mono.wasmruntime` and `libs.pretest` subsets are included even for a Mono-only change or this directory will not be updated (details below).
 

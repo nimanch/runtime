@@ -52,7 +52,7 @@ The steps above may be all you need to know to make a change. Want more details 
 
 ## Building everything
 
-This document explains how to work on libraries. In order to work on library projects or run library tests it is necessary to have built the runtime to give the libraries something to run on. You should normally build CoreCLR runtime in release configuration and libraries in debug configuration. If you haven't already done so, please read [this document](../../README.md#Configurations) to understand configurations.
+This document explains how to work on libraries. In order to work on library projects or run library tests it is necessary to have built the runtime to give the libraries something to run on. You should normally build CoreCLR runtime in release configuration and libraries in debug configuration. If you haven't already done so, please read [this document](../../README.md#build-configurations) to understand configurations.
 
 These example commands will build a release CoreCLR (and CoreLib), debug libraries, and debug installer:
 
@@ -166,7 +166,7 @@ Under the `src` directory is a set of directories, each of which represents a pa
 
 For example the `src\libraries\System.Diagnostics.DiagnosticSource` directory holds the source code for the System.Diagnostics.DiagnosticSource.dll assembly.
 
-You can build the DLL for System.Diagnostics.DiagnosticSource.dll by going to the `src\libraries\System.Diagnostics.DiagnosticsSource\src` directory and typing `dotnet build`. The DLL ends up in `artifacts\bin\System.Diagnostics.DiagnosticSource` as well as `artifacts\bin\runtime\[$(BuildTargetFramework)-$(TargetOS)-$(Configuration)-$(TargetArchitecture)]`.
+You can build the DLL for System.Diagnostics.DiagnosticSource.dll by going to the `src\libraries\System.Diagnostics.DiagnosticSource\src` directory and typing `dotnet build`. The DLL ends up in `artifacts\bin\System.Diagnostics.DiagnosticSource` as well as `artifacts\bin\runtime\[$(BuildTargetFramework)-$(TargetOS)-$(Configuration)-$(TargetArchitecture)]`.
 
 You can build the tests for System.Diagnostics.DiagnosticSource.dll by going to
 `src\libraries\System.Diagnostics.DiagnosticSource\tests` and typing `dotnet build`.
