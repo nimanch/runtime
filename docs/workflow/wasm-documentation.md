@@ -66,14 +66,18 @@ After building the runtime, use the `generate-coreclr-helpers` script for your p
 - **[ICU for WebAssembly](../design/features/globalization-icu-wasm.md)** - Globalization and ICU database configuration
 
 ### Testing WebAssembly Changes
-For testing WebAssembly implementation changes end-to-end, see the [testing documentation](testing/mono/testing.md#testing-webassembly).
+For testing WebAssembly implementation changes end-to-end, see the [testing documentation](testing/mono/testing.md#webassembly).
+
+## Deployment and Hosting
+
+See [Hosting the application](../../src/mono/wasm/features.md#hosting-the-application) for deployment and web server configuration guidance.
 
 ## Advanced Topics
 
 ### Performance and Optimization
 - **[Profiling](../../src/mono/wasm/features.md#profiling-in-the-browser-dev-tools)**: Use browser dev tools profiler integration
 - **[AOT Compilation](../../src/mono/wasm/features.md#aot)**: Improve runtime performance with ahead-of-time compilation
-- **[IL Trimming](../../src/mono/wasm/features.md#trimming)**: Reduce application size by removing unused code
+- **[IL Trimming](../../src/mono/wasm/features.md#il-trimming)**: Reduce application size by removing unused code
 
 ### Samples and Examples
 Located in `src/mono/sample/wasm/`:
