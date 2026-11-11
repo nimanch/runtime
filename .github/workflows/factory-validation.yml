@@ -1,0 +1,360 @@
+# Exact-SHA validation on GitHub-hosted runners for work that cannot be validated on the
+# automation's execution host (for example, when the host's egress allowlist omits the NuGet
+# audit service, or when Windows is required).
+#
+# - Dispatch (repository writers only): run a single profile against an exact commit SHA.
+# - pull_request (never pull_request_target): self-test this workflow at the PR head.
+#
+# The workflow has read-only repository access, uses no secrets, does not persist checkout
+# credentials, and never interpolates inputs directly into scripts.
+
+name: Factory validation
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: 'Exact 40-character commit SHA to validate'
+        required: true
+        type: string
+      profile:
+        description: 'Validation profile'
+        required: true
+        type: choice
+        options:
+          - linux-x64-checked
+          - windows-native-reader
+      test_tree:
+        description: 'Optional runtime test subtree under src/tests (for example JIT/opt/Devirtualization)'
+        required: false
+        default: ''
+        type: string
+      expected_diasymreader_version:
+        description: 'windows-native-reader only: fail unless MicrosoftDiaSymReaderNativeVersion equals this value'
+        required: false
+        default: ''
+        type: string
+  pull_request:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/factory-validation.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: factory-validation-${{ github.event_name }}-${{ inputs.sha || github.event.pull_request.head.sha }}-${{ inputs.profile || 'self-test' }}
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    name: Resolve and validate inputs
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      linux: ${{ steps.resolve.outputs.linux }}
+      windows: ${{ steps.resolve.outputs.windows }}
+      linux_test_tree: ${{ steps.resolve.outputs.linux_test_tree }}
+      windows_test_tree: ${{ steps.resolve.outputs.windows_test_tree }}
+      expected_diasymreader_version: ${{ steps.resolve.outputs.expected_diasymreader_version }}
+    steps:
+      - name: Resolve
+        id: resolve
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          IN_SHA: ${{ inputs.sha }}
+          IN_PROFILE: ${{ inputs.profile }}
+          IN_TEST_TREE: ${{ inputs.test_tree }}
+          IN_EXPECTED_VERSION: ${{ inputs.expected_diasymreader_version }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          tree_re='^[A-Za-z0-9_][A-Za-z0-9_./-]*$'
+          if [[ "$EVENT_NAME" == "pull_request" ]]; then
+            sha="$PR_HEAD_SHA"
+            linux=true; windows=true
+            linux_tree='JIT/opt/Devirtualization'
+            windows_tree='baseservices/exceptions/fullpdbstacktrace'
+            expected=''
+          else
+            sha="$IN_SHA"
+            case "$IN_PROFILE" in
+              linux-x64-checked)     linux=true;  windows=false ;;
+              windows-native-reader) linux=false; windows=true ;;
+              *) echo "::error::Unknown profile"; exit 1 ;;
+            esac
+            tree="$IN_TEST_TREE"
+            if [[ -n "$tree" ]] && { [[ ! "$tree" =~ $tree_re ]] || [[ "$tree" == *..* ]]; }; then
+              echo "::error::test_tree must match $tree_re and must not contain '..'"; exit 1
+            fi
+            linux_tree="$tree"
+            windows_tree="${tree:-baseservices/exceptions/fullpdbstacktrace}"
+            expected="$IN_EXPECTED_VERSION"
+            if [[ -n "$expected" && ! "$expected" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?$ ]]; then
+              echo "::error::expected_diasymreader_version is not a valid NuGet version"; exit 1
+            fi
+          fi
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::sha must be a full lowercase 40-character commit SHA"; exit 1
+          fi
+          {
+            echo "sha=$sha"
+            echo "linux=$linux"
+            echo "windows=$windows"
+            echo "linux_test_tree=$linux_tree"
+            echo "windows_test_tree=$windows_tree"
+            echo "expected_diasymreader_version=$expected"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "### Factory validation request"
+            echo "- Event: \`$EVENT_NAME\`"
+            echo "- SHA: \`$sha\`"
+            echo "- Linux x64 Checked: \`$linux\` (test tree: \`${linux_tree:-none}\`)"
+            echo "- Windows native reader: \`$windows\` (test tree: \`$windows_tree\`, expected version: \`${expected:-not gated}\`)"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  linux-x64-checked:
+    name: Linux x64 Checked baseline
+    needs: resolve
+    if: needs.resolve.outputs.linux == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 345
+    env:
+      SHA: ${{ needs.resolve.outputs.sha }}
+      TEST_TREE: ${{ needs.resolve.outputs.linux_test_tree }}
+    steps:
+      - name: Free disk space
+        shell: bash
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          df -h /
+
+      - name: Checkout exact SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+
+      - name: Verify HEAD
+        shell: bash
+        run: |
+          head="$(git rev-parse HEAD)"
+          echo "HEAD=$head"
+          if [[ "$head" != "$SHA" ]]; then echo "::error::HEAD $head != requested $SHA"; exit 1; fi
+
+      - name: Install build dependencies
+        shell: bash
+        run: sudo ./eng/common/native/install-dependencies.sh
+
+      - name: NuGet audit endpoint
+        shell: bash
+        run: |
+          curl -sS --max-time 20 -o /dev/null -w 'NuGet audit HTTP status: %{http_code}\n' https://data.nuget.org/v3/index.json
+
+      - name: Build clr+libs+host (Checked runtime)
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p artifacts/factory
+          ./build.sh clr+libs+host -rc Checked -lc Release -hc Checked 2>&1 | tee artifacts/factory/build.log
+
+      - name: Generate Core_Root
+        shell: bash
+        run: |
+          set -o pipefail
+          src/tests/build.sh -GenerateLayoutOnly x64 Checked 2>&1 | tee artifacts/factory/core-root.log
+
+      - name: Build and run runtime test subtree
+        if: env.TEST_TREE != ''
+        shell: bash
+        run: |
+          set -o pipefail
+          src/tests/build.sh x64 Checked "-tree:$TEST_TREE" 2>&1 | tee artifacts/factory/test-build.log
+          src/tests/run.sh x64 Checked 2>&1 | tee artifacts/factory/test-run.log
+
+      - name: Summarize test results
+        if: always() && env.TEST_TREE != ''
+        shell: bash
+        run: |
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import glob, xml.etree.ElementTree as ET
+          files = glob.glob('artifacts/log/**/TestRunResults_*.xml', recursive=True)
+          counts = {}
+          for f in files:
+              for t in ET.parse(f).getroot().iter('test'):
+                  r = t.get('result', 'Unknown'); counts[r] = counts.get(r, 0) + 1
+          print('### Linux x64 Checked tests')
+          print(f'- Result files: {len(files)}; counts: {counts or "none found"}')
+          PY
+
+      - name: Package Core_Root
+        if: success()
+        shell: bash
+        run: tar -C artifacts/tests/coreclr/linux.x64.Checked/Tests -czf artifacts/factory/core_root-linux-x64-checked.tar.gz Core_Root
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux-x64-checked-logs-${{ needs.resolve.outputs.sha }}
+          path: |
+            artifacts/factory/*.log
+            artifacts/log/**/TestRunResults_*
+            artifacts/log/**/*.binlog
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload Core_Root
+        if: success()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: linux-x64-checked-core-root-${{ needs.resolve.outputs.sha }}
+          path: artifacts/factory/core_root-linux-x64-checked.tar.gz
+          compression-level: 0
+          retention-days: 14
+
+  windows-native-reader:
+    name: Windows ${{ matrix.arch }} native reader
+    needs: resolve
+    if: needs.resolve.outputs.windows == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            image: windows-latest
+            dll_arch: amd64
+          - arch: x86
+            image: windows-latest
+            dll_arch: x86
+          - arch: arm64
+            image: windows-11-arm
+            dll_arch: arm64
+    runs-on: ${{ matrix.image }}
+    timeout-minutes: 345
+    env:
+      SHA: ${{ needs.resolve.outputs.sha }}
+      ARCH: ${{ matrix.arch }}
+      DLL_ARCH: ${{ matrix.dll_arch }}
+      TEST_TREE: ${{ needs.resolve.outputs.windows_test_tree }}
+      EXPECTED_VERSION: ${{ needs.resolve.outputs.expected_diasymreader_version }}
+    steps:
+      - name: Checkout exact SHA
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.resolve.outputs.sha }}
+          persist-credentials: false
+
+      - name: Verify HEAD and host
+        shell: pwsh
+        run: |
+          $head = git rev-parse HEAD
+          "HEAD=$head RUNNER_OS=$env:RUNNER_OS RUNNER_ARCH=$env:RUNNER_ARCH PROCESSOR_ARCHITECTURE=$env:PROCESSOR_ARCHITECTURE"
+          if ($head -ne $env:SHA) { Write-Error "HEAD $head != requested $env:SHA"; exit 1 }
+          New-Item -ItemType Directory -Force artifacts\factory | Out-Null
+
+      - name: Build clr+libs+host+packs.product (Release)
+        id: build
+        shell: pwsh
+        run: |
+          .\build.cmd clr+libs+host+packs.product -rc Release -lc Release -hc Release -a $env:ARCH *>&1 | Tee-Object artifacts\factory\build.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build and run native-PDB runtime tests
+        id: tests
+        shell: pwsh
+        run: |
+          .\src\tests\build.cmd $env:ARCH Release -tree $env:TEST_TREE *>&1 | Tee-Object artifacts\factory\test-build.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\src\tests\run.cmd $env:ARCH Release *>&1 | Tee-Object artifacts\factory\test-run.log
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Inspect DiaSymReader native assets
+        if: always() && steps.build.outcome == 'success'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $props = Get-Content eng\Versions.props -Raw
+          if ($props -notmatch '<MicrosoftDiaSymReaderNativeVersion>([^<]+)</MicrosoftDiaSymReaderNativeVersion>') { throw 'Pinned version not found' }
+          $pinned = $Matches[1]
+          $dllName = "Microsoft.DiaSymReader.Native.$env:DLL_ARCH.dll"
+          $report = [System.Collections.Generic.List[string]]::new()
+          $failed = $false
+          function Fail([string]$why) { $script:failed = $true; $script:report.Add("- FAIL: $why") }
+          $report.Add("### Windows $env:ARCH DiaSymReader.Native")
+          $report.Add("- Pinned ``MicrosoftDiaSymReaderNativeVersion``: ``$pinned``")
+          if ($env:EXPECTED_VERSION -and $env:EXPECTED_VERSION -ne $pinned) { Fail "pinned version is not the expected ``$env:EXPECTED_VERSION``" }
+
+          # Every DLL in the restored pinned package, keyed by file name.
+          $pkgRoots = @("$PWD\.packages", "$env:USERPROFILE\.nuget\packages", $env:NUGET_PACKAGES) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+          $pkgDir = $pkgRoots | ForEach-Object { Join-Path $_ "microsoft.diasymreader.native\$pinned" } | Where-Object { Test-Path $_ } | Select-Object -First 1
+          $known = @{}
+          if (-not $pkgDir) { Fail "restored package $pinned not found under $($pkgRoots -join ', ')" }
+          else {
+            Get-ChildItem $pkgDir -Recurse -Filter 'Microsoft.DiaSymReader.Native*.dll' | ForEach-Object {
+              $known[$_.Name] = (Get-FileHash $_.FullName -Algorithm SHA256).Hash
+              $report.Add("- Restored ``$($_.FullName.Substring($pkgDir.Length + 1))`` FileVersion ``$($_.VersionInfo.FileVersion)`` SHA256 ``$($known[$_.Name])``")
+            }
+            if (-not $known.ContainsKey($dllName)) { Fail "restored package lacks $dllName" }
+          }
+          function Describe([string]$label, [System.IO.FileInfo]$file) {
+            $h = (Get-FileHash $file.FullName -Algorithm SHA256).Hash
+            $same = $known.ContainsKey($file.Name) -and $known[$file.Name] -eq $h
+            if (-not $same) { Fail "$label is not byte-identical to the restored $pinned asset" }
+            $script:report.Add("  - $label FileVersion ``$($file.VersionInfo.FileVersion)`` SHA256 ``$h`` matchesRestored=``$same``")
+            return $same
+          }
+
+          $report.Add('- Produced nupkgs containing the native reader:')
+          $runtimePacks = 0
+          $tmp = Join-Path $env:RUNNER_TEMP 'packinspect'
+          foreach ($pack in Get-ChildItem artifacts\packages -Recurse -Filter '*.nupkg' | Where-Object { $_.Name -notlike '*.symbols.nupkg' }) {
+            $isRuntimePack = $pack.Name -like "Microsoft.NETCore.App.Runtime*.win-$env:ARCH.*"
+            if ($isRuntimePack) { $runtimePacks++ }
+            $zip = [System.IO.Compression.ZipFile]::OpenRead($pack.FullName)
+            try {
+              $entries = @($zip.Entries | Where-Object { $_.Name -like 'Microsoft.DiaSymReader.Native*.dll' })
+              if ($isRuntimePack -and -not ($entries | Where-Object { $_.Name -eq $dllName })) { Fail "$($pack.Name) does not contain $dllName" }
+              foreach ($e in $entries) {
+                Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue; New-Item -ItemType Directory $tmp | Out-Null
+                $out = Join-Path $tmp $e.Name
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($e, $out)
+                if ($isRuntimePack -and $e.Name -ne $dllName) { Fail "$($pack.Name) contains unexpected $($e.Name)" }
+                [void](Describe "``$($pack.Name)!$($e.FullName)``" (Get-Item $out))
+              }
+            } finally { $zip.Dispose() }
+          }
+          if ($runtimePacks -eq 0) { Fail "no win-$env:ARCH runtime pack was produced" }
+
+          $report.Add('- Copies under artifacts/ (bin, obj, tests, Core_Root):')
+          Get-ChildItem artifacts -Recurse -Filter 'Microsoft.DiaSymReader.Native*.dll' -ErrorAction SilentlyContinue | ForEach-Object {
+            [void](Describe "``$($_.FullName.Substring($PWD.Path.Length + 1))``" $_)
+          }
+          $report.Add("- Result: $(if ($failed) { 'FAIL' } else { 'PASS' })")
+          $report | Tee-Object -FilePath artifacts\factory\diasymreader-inventory.md | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
+          if ($failed) { exit 1 }
+
+      - name: Summarize test results
+        if: always()
+        shell: pwsh
+        run: |
+          $files = Get-ChildItem artifacts\log -Recurse -Filter 'TestRunResults_*.xml' -ErrorAction SilentlyContinue
+          $counts = @{}
+          foreach ($f in $files) { foreach ($t in ([xml](Get-Content $f.FullName -Raw)).SelectNodes('//test')) { $counts[$t.result] = 1 + [int]$counts[$t.result] } }
+          $tests = foreach ($f in $files) { foreach ($t in ([xml](Get-Content $f.FullName -Raw)).SelectNodes('//test')) { "  - ``$($t.name)``: $($t.result)" } }
+          @("### Windows $env:ARCH runtime tests (``$env:TEST_TREE``)", "- Result files: $($files.Count); counts: $(($counts.GetEnumerator() | ForEach-Object { "$($_.Key)=$($_.Value)" }) -join ', ')") + $tests |
+            Tee-Object -FilePath artifacts\factory\test-summary.md | Out-File -Append -FilePath $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: windows-${{ matrix.arch }}-native-reader-${{ needs.resolve.outputs.sha }}
+          path: |
+            artifacts/factory/*
+            artifacts/log/**/TestRunResults_*
+          if-no-files-found: warn
+          retention-days: 14
