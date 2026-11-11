@@ -39,7 +39,7 @@ This document serves as a guide for contributors to the WebAssembly implementati
 
 ### Library Testing
 - **[Testing Libraries on WebAssembly](testing/libraries/testing-wasm.md)** - Run library tests with different JavaScript engines and browsers
-- **[Debugging WebAssembly Libraries](testing/libraries/debugging-wasm.md)** - Debug library tests in Chrome DevTools and VS Code
+- **[Debugging WebAssembly Libraries](debugging/mono/wasm-debugging.md#common-debugging-workflow)** - Debug library tests in Chrome DevTools and VS Code
 
 ### Runtime Debugging
 - **[WebAssembly Debugging](debugging/mono/wasm-debugging.md)** - Consolidated debugging reference for WebAssembly applications and native runtime debugging
